@@ -25,7 +25,7 @@ app.post('/voice', (req, res) => {
   res.type('text/xml')
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-      <Say><prosody rate="150%">Hello, thank you for calling Adore Salon. How can I help you today?</prosody></Say>
+      <Say><prosody rate="200%">Hello, thank you for calling Adore Salon. How can I help you today?</prosody></Say>
       <Connect>
         <Stream url="wss://${req.headers.host}/stream" />
       </Connect>
@@ -69,7 +69,7 @@ wss.on('connection', (ws) => {
       console.log('AI:', reply)
 
       await twilioClient.calls(callSid).update({
-        twiml: `<Response><Say><prosody rate="150%">${reply}</prosody></Say><Connect><Stream url="wss://franco-first-commit.onrender.com/stream"/></Connect></Response>`
+        twiml: `<Response><Say><prosody rate="200%">${reply}</prosody></Say><Connect><Stream url="wss://franco-first-commit.onrender.com/stream"/></Connect></Response>`
       })
     } catch (err) {
       console.error(err)
