@@ -69,7 +69,7 @@ wss.on('connection', (ws) => {
       console.log('AI:', reply)
 
       await twilioClient.calls(callSid).update({
-        twiml: `<Response><Say>${reply}</Say><Pause length="1"/></Response>`
+        twiml: `<Response><Say>${reply}</Say><Connect><Stream url="wss://franco-first-commit.onrender.com/stream"/></Connect></Response>`
       })
     } catch (err) {
       console.error(err)
