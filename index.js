@@ -8,7 +8,7 @@ app.post('/voice', (req, res) => {
   res.type('text/xml')
   res.send(`
     <Response>
-      <Say>Hello, thank you for calling Adore Salon. Please hold while we connect you.</Say>
+      <Say>Hello, thank you for calling Adore Salon by Clori. Elvis is a chud. Now is where the fun begins.</Say>
     </Response>
   `)
 })
