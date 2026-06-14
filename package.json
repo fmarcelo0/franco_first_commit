@@ -1,11 +1,14 @@
 {
   "name": "adore-salon",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "express": "^4.18.0",
     "@anthropic-ai/sdk": "^0.39.0",
     "@deepgram/sdk": "^3.0.0",
-    "ws": "^8.0.0",
-    "twilio": "^5.0.0"
+    "dotenv": "^17.4.2",
+    "express": "^4.18.0",
+    "twilio": "^5.0.0",
+    "ws": "^8.0.0"
   }
 }

@@ -118,6 +118,28 @@ async function getDayAvailability({ fromDateTime, serviceId } = {}) {
   return res.json()
 }
 
+// --- Treatments (services) -----------------------------------------------
+
+// POST /v4.1/customer/treatments -> the location's services (with real IDs,
+// names, prices, durations). Needed to map a spoken service to a TreatmentID.
+async function findTreatments() {
+  const token = await getAccessToken()
+  const res = await fetch(`${BASE_URL}/v4.1/customer/treatments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY },
+    body: JSON.stringify({ LocationID: Number(LOCATION_ID), access_token: token })
+  })
+  if (!res.ok) throw new Error(`findTreatments failed: ${res.status} ${await res.text()}`)
+  const data = await res.json()
+  const list = data.Treatments || data.Results || []
+  return list.map(t => ({
+    treatmentId: t.ID,
+    name: t.Name,
+    price: t.Price && t.Price.Amount,
+    duration: t.TotalDuration
+  }))
+}
+
 // --- Appointments --------------------------------------------------------
 
 // POST /v4.1/customer/appointments
@@ -152,6 +174,71 @@ async function cancelAppointment({ appointmentId, cancellationReasonId } = {}) {
     body: JSON.stringify(payload)
   })
   if (!res.ok) throw new Error(`CancelAppointment failed: ${res.status} ${await res.text()}`)
+  return res.json()
+}
+
+// --- Create customer + appointment (Customer API writes) -----------------
+
+// POST /v4.1/customer/customer -> creates a client profile, returns it with a
+// new customer ID. Needed before booking if the caller isn't already a client.
+async function createCustomer({ firstName, lastName, email, phone } = {}) {
+  const token = await getAccessToken()
+  const payload = {
+    LocationID: Number(LOCATION_ID),
+    FirstName: firstName,
+    LastName: lastName,
+    Email: email,
+    access_token: token
+  }
+  if (phone) payload.CellPhone = phone
+
+  const res = await fetch(`${BASE_URL}/v4.1/customer/customer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY },
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) throw new Error(`createCustomer failed: ${res.status} ${await res.text()}`)
+  return res.json()
+}
+
+// POST /v4.1/customer/appointment/create -> books an appointment for a single
+// service. Uses the Customer API (no RoomID required, unlike the Merchant API).
+//   customerId    - existing Booker customer ID
+//   treatmentId   - from FindTreatments (the service)
+//   startDateTime - ISO 8601 with offset, e.g. "2026-06-12T14:00:00-04:00"
+//   employeeId    - optional specific staff member
+async function createAppointment({ customerId, customer = {}, treatmentId, startDateTime, employeeId, sendEmail = true, sendSms = false } = {}) {
+  const token = await getAccessToken()
+
+  const treatmentSlot = {
+    TreatmentID: Number(treatmentId),
+    StartDateTimeOffset: startDateTime
+  }
+  if (employeeId) {
+    treatmentSlot.EmployeeID = Number(employeeId)
+    treatmentSlot.EmployeeWasRequested = true
+  }
+
+  // The Customer block needs name/phone/email in addition to the ID.
+  const customerBlock = { ID: Number(customerId), SendEmail: sendEmail, SendSMS: sendSms }
+  if (customer.firstName) customerBlock.FirstName = customer.firstName
+  if (customer.lastName) customerBlock.LastName = customer.lastName
+  if (customer.email) customerBlock.Email = customer.email
+  if (customer.phone) customerBlock.CellPhone = customer.phone
+
+  const payload = {
+    LocationID: Number(LOCATION_ID),
+    Customer: customerBlock,
+    ItineraryTimeSlotList: [{ TreatmentTimeSlots: [treatmentSlot] }],
+    access_token: token
+  }
+
+  const res = await fetch(`${BASE_URL}/v4.1/customer/appointment/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY },
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) throw new Error(`createAppointment failed: ${res.status} ${await res.text()}`)
   return res.json()
 }
 
@@ -252,6 +339,35 @@ function normalizeAppointment(raw) {
   }
 }
 
+// POST /v4.1/merchant/appointment -> books an appointment AS THE BUSINESS, so
+// the customer does not need to log in (unlike the Customer API). This is the
+// right path for a receptionist. Requires merchant auth (PAT) + a RoomID.
+async function createMerchantAppointment({ customerId, treatmentId, roomId, employeeId, startDateTime, endDateTime, resourceTypeId = 2 } = {}) {
+  const token = await getMerchantAccessToken()
+  const payload = {
+    Customer: { ID: Number(customerId) },
+    LocationID: Number(LOCATION_ID),
+    AppointmentDateOffset: startDateTime,
+    ResourceTypeID: resourceTypeId,
+    AppointmentTreatmentDTOs: [{
+      TreatmentID: Number(treatmentId),
+      RoomID: Number(roomId),
+      EmployeeID: Number(employeeId),
+      StartTimeOffset: startDateTime,
+      EndTimeOffset: endDateTime,
+      IsDurationOverridden: true
+    }],
+    access_token: token
+  }
+  const res = await fetch(`${BASE_URL}/v4.1/merchant/appointment`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': MERCHANT_SUBSCRIPTION_KEY },
+    body: JSON.stringify(payload)
+  })
+  if (!res.ok) throw new Error(`createMerchantAppointment failed: ${res.status} ${await res.text()}`)
+  return res.json()
+}
+
 // Full caller lookup: phone -> customer -> their appointments.
 // Returns the same shape as a mock customer record, or null if not found.
 async function lookupCustomerByPhone(phone) {
@@ -278,8 +394,12 @@ module.exports = {
   getMerchantAccessToken,
   getAvailableDates,
   getDayAvailability,
+  findTreatments,
   findAppointments,
   cancelAppointment,
+  createCustomer,
+  createAppointment,
+  createMerchantAppointment,
   findCustomers,
   lookupCustomerByPhone,
   LOCATION_ID
