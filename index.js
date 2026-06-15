@@ -6,7 +6,6 @@ const WebSocket = require('ws')
 const http = require('http')
 const twilio = require('twilio')
 const booker = require('./booker')
-const restfulBooker = require('./restfulBooker')
 
 const app = express()
 app.use(express.urlencoded({ extended: false }))
@@ -230,56 +229,70 @@ Upcoming appointments:
 ${appts}`
 }
 
-// Tools the AI can call during a live call to read/write real bookings in the
-// restful-booker database.
+// Tools the AI can call during a live call to look up services and book
+// appointments in the real Booker/Mindbody account.
 const BOOKING_TOOLS = [
   {
-    name: 'find_appointments',
-    description: "Look up a caller's existing appointments by their first and last name.",
+    name: 'lookup_service',
+    description: 'Look up a salon service by name to get its real price and duration before booking.',
     input_schema: {
       type: 'object',
       properties: {
-        firstname: { type: 'string' },
-        lastname: { type: 'string' }
+        service_name: { type: 'string', description: 'e.g. "waxing", "massage"' }
       },
-      required: ['firstname', 'lastname']
+      required: ['service_name']
     }
   },
   {
-    name: 'create_appointment',
-    description: 'Book a new appointment for a caller in the system.',
+    name: 'book_appointment',
+    description: "Book an appointment for the caller. Look up the service first if you don't have it.",
     input_schema: {
       type: 'object',
       properties: {
         firstname: { type: 'string' },
         lastname: { type: 'string' },
-        service: { type: 'string', description: 'e.g. "Gel Manicure"' },
+        service_name: { type: 'string', description: 'the service to book' },
         date: { type: 'string', description: 'appointment date as YYYY-MM-DD' },
-        price: { type: 'number', description: 'service price in dollars, optional' }
+        time: { type: 'string', description: 'start time as HH:MM, 24-hour' }
       },
-      required: ['firstname', 'lastname', 'service', 'date']
+      required: ['firstname', 'lastname', 'service_name', 'date', 'time']
     }
   }
 ]
 
-async function runBookingTool(name, input) {
-  if (name === 'find_appointments') {
-    const bookings = await restfulBooker.findBookingsByName(input.firstname, input.lastname)
-    if (!bookings.length) return 'No appointments found for that name.'
-    return bookings.slice(0, 3)
-      .map(b => `${b.additionalneeds || 'Appointment'} on ${b.bookingdates?.checkin}`)
-      .join('; ')
+async function runBookingTool(name, input, ctx = {}) {
+  if (name === 'lookup_service') {
+    const matches = await booker.searchTreatments(input.service_name)
+    if (!matches.length) return 'No matching service found.'
+    return matches.map(m => `${m.name} — $${m.price}, ${m.duration} min`).join('; ')
   }
-  if (name === 'create_appointment') {
-    const res = await restfulBooker.createBooking({
-      firstname: input.firstname,
-      lastname: input.lastname,
-      totalprice: input.price || 0,
-      depositpaid: false,
-      bookingdates: { checkin: input.date, checkout: input.date },
-      additionalneeds: input.service
-    })
-    return `Booked successfully. Confirmation number ${res.bookingid}.`
+  if (name === 'book_appointment') {
+    const matches = await booker.searchTreatments(input.service_name)
+    if (!matches.length) return `Sorry, I couldn't find a service matching "${input.service_name}".`
+    const svc = matches[0]
+    // Build start/end in Paris offset (CEST, +02:00) — the format Booker accepts.
+    const pad = n => String(n).padStart(2, '0')
+    const [h, m] = input.time.split(':').map(Number)
+    const endMin = h * 60 + m + (svc.duration || 30)
+    const startDateTime = `${input.date}T${pad(h)}:${pad(m)}:00+02:00`
+    const endDateTime = `${input.date}T${pad(Math.floor(endMin / 60))}:${pad(endMin % 60)}:00+02:00`
+    try {
+      const res = await booker.bookAppointment({
+        firstName: input.firstname,
+        lastName: input.lastname,
+        phone: ctx.callerPhone,
+        treatmentId: svc.treatmentId,
+        startDateTime,
+        endDateTime
+      })
+      if (res.IsSuccess) {
+        const id = res.Appointment && res.Appointment.ID
+        return `Booked ${svc.name} on ${input.date} at ${input.time}.${id ? ' Confirmation number ' + id + '.' : ''}`
+      }
+      return `Could not book: ${res.ErrorMessage || 'unknown error'}`
+    } catch (e) {
+      return `Booking error: ${e.message}`
+    }
   }
   return 'Unknown tool.'
 }
@@ -300,10 +313,12 @@ STAFF:
 ${MOCK_BUSINESS.staff.map(s => `${s.name} (specializes in ${s.specialties.join(' & ')})`).join(', ')}
 
 BOOKING & APPOINTMENTS:
-You can look up existing appointments and book new ones using your tools.
-- To check a caller's appointments, use find_appointments with their first and last name.
-- To book, use create_appointment with their name, the service, and the date (YYYY-MM-DD). After it succeeds, read the confirmation number back to the caller.
-If you don't know the caller's name yet, ask for their first and last name before using a tool. Today's date is ${new Date().toISOString().slice(0, 10)}.
+You can look up real services and book appointments using your tools.
+- Use lookup_service to confirm a service's real price and duration.
+- To book, collect the caller's first name, last name, the service, a date (YYYY-MM-DD) and a time (HH:MM), then use book_appointment.
+- If the booking comes back as not available, tell the caller and offer a different time.
+- After a successful booking, read the confirmation number back to the caller.
+Ask for any missing detail before booking. Today's date is ${new Date().toISOString().slice(0, 10)}.
 
 CALLER IDENTIFICATION:
 We usually recognize callers by the phone number they are calling from. If a "CALLER ON THE LINE" section is provided below, you already know who they are and what appointments they have — greet them by their first name and answer questions about "my appointment" directly from that info. Do NOT ask them to identify themselves again. If they ask to cancel or change an appointment, confirm the details back to them and let them know a staff member will finalize the change. If NO caller section is provided, politely ask for their first and last name and the phone number on their account so it can be looked up.
@@ -395,7 +410,7 @@ wss.on('connection', (ws) => {
           console.log('Tool:', block.name, JSON.stringify(block.input))
           let result
           try {
-            result = await runBookingTool(block.name, block.input)
+            result = await runBookingTool(block.name, block.input, { callerPhone })
           } catch (e) {
             result = `Error: ${e.message}`
           }

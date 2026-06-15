@@ -23,6 +23,10 @@ const CLIENT_SECRET = process.env.BOOKER_CLIENT_SECRET
 const SUBSCRIPTION_KEY = process.env.BOOKER_SUBSCRIPTION_KEY
 const MERCHANT_SUBSCRIPTION_KEY = process.env.BOOKER_MERCHANT_SUBSCRIPTION_KEY
 const PERSONAL_ACCESS_TOKEN = process.env.BOOKER_PERSONAL_ACCESS_TOKEN
+// Default room/employee used when booking. A real available slot would supply
+// these; until the availability endpoint is reliable they're a starting point.
+const DEFAULT_ROOM_ID = process.env.BOOKER_DEFAULT_ROOM_ID
+const DEFAULT_EMPLOYEE_ID = process.env.BOOKER_DEFAULT_EMPLOYEE_ID
 
 function isConfigured() {
   return Boolean(LOCATION_ID && CLIENT_ID && CLIENT_SECRET && SUBSCRIPTION_KEY)
@@ -138,6 +142,15 @@ async function findTreatments() {
     price: t.Price && t.Price.Amount,
     duration: t.TotalDuration
   }))
+}
+
+// Cached treatment list + name search (the catalog rarely changes per call).
+let treatmentCache = null
+async function searchTreatments(query) {
+  if (!treatmentCache) treatmentCache = await findTreatments()
+  const q = (query || '').toLowerCase().trim()
+  if (!q) return treatmentCache.slice(0, 5)
+  return treatmentCache.filter(t => t.name && t.name.toLowerCase().includes(q)).slice(0, 5)
 }
 
 // --- Appointments --------------------------------------------------------
@@ -368,6 +381,27 @@ async function createMerchantAppointment({ customerId, treatmentId, roomId, empl
   return res.json()
 }
 
+// High-level booking used by the call flow: creates the customer, then books
+// the appointment as the business. Returns Booker's raw result (IsSuccess /
+// ErrorMessage / Appointment).
+async function bookAppointment({ firstName, lastName, email, phone, treatmentId, startDateTime, endDateTime, roomId, employeeId }) {
+  email = email || `${firstName}.${lastName}.${Date.now()}@noemail.adore`.toLowerCase()
+  const cust = await createCustomer({ firstName, lastName, email, phone })
+  const customerId = cust.CustomerID
+  if (!customerId) throw new Error(`could not create customer: ${JSON.stringify(cust).slice(0, 150)}`)
+
+  // Pass the offset-format datetimes straight through (Booker rejects the
+  // millisecond/UTC "Z" format that Date.toISOString() produces).
+  return createMerchantAppointment({
+    customerId,
+    treatmentId,
+    roomId: roomId || DEFAULT_ROOM_ID,
+    employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
+    startDateTime,
+    endDateTime
+  })
+}
+
 // Full caller lookup: phone -> customer -> their appointments.
 // Returns the same shape as a mock customer record, or null if not found.
 async function lookupCustomerByPhone(phone) {
@@ -395,6 +429,8 @@ module.exports = {
   getAvailableDates,
   getDayAvailability,
   findTreatments,
+  searchTreatments,
+  bookAppointment,
   findAppointments,
   cancelAppointment,
   createCustomer,
