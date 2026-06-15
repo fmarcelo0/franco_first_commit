@@ -253,12 +253,22 @@ const BOOKING_TOOLS = [
         lastname: { type: 'string' },
         service_name: { type: 'string', description: 'the service to book' },
         date: { type: 'string', description: 'appointment date as YYYY-MM-DD' },
-        time: { type: 'string', description: 'start time as HH:MM, 24-hour' }
+        time: { type: 'string', description: 'start time as HH:MM, 24-hour' },
+        employee: { type: 'string', description: 'optional: a specific staff member the caller requested' }
       },
       required: ['firstname', 'lastname', 'service_name', 'date', 'time']
     }
   }
 ]
+
+// Map a requested staff name to a real Booker employee ID (undefined if none).
+function findStaffId(requested) {
+  if (!requested) return undefined
+  const q = requested.toLowerCase().trim()
+  const match = MOCK_BUSINESS.staff.find(s => s.name.toLowerCase() === q) ||
+                MOCK_BUSINESS.staff.find(s => s.name.toLowerCase().includes(q))
+  return match && match.employeeId
+}
 
 async function runBookingTool(name, input, ctx = {}) {
   if (name === 'lookup_service') {
@@ -282,6 +292,7 @@ async function runBookingTool(name, input, ctx = {}) {
         lastName: input.lastname,
         phone: ctx.callerPhone,
         treatmentId: svc.treatmentId,
+        employeeId: findStaffId(input.employee),  // undefined -> default employee
         startDateTime,
         endDateTime
       })
@@ -316,6 +327,7 @@ BOOKING & APPOINTMENTS:
 You can look up real services and book appointments using your tools.
 - Use lookup_service to confirm a service's real price and duration.
 - To book, collect the caller's first name, last name, the service, a date (YYYY-MM-DD) and a time (HH:MM), then use book_appointment.
+- If the caller requests a specific staff member (${MOCK_BUSINESS.staff.map(s => s.name).join(', ')}), pass it as the employee. Otherwise leave it blank and we'll assign someone.
 - If the booking comes back as not available, tell the caller and offer a different time.
 - After a successful booking, read the confirmation number back to the caller.
 Ask for any missing detail before booking. Today's date is ${new Date().toISOString().slice(0, 10)}.
