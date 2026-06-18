@@ -40,11 +40,10 @@ const MOCK_BUSINESS = {
     '4:00 PM', '4:15 PM', '4:30 PM', '4:45 PM',
     '5:00 PM', '5:15 PM', '5:30 PM'
   ],
-  // Real Booker employees (Location 3749), so staff names match what's bookable.
+  // Real bookable Booker employee (Location 3749). "Aaron" = aaaaaaron aaaapple,
+  // the one staff member confirmed to perform services in this test account.
   staff: [
-    { employeeId: 641609, name: 'Auden' },
-    { employeeId: 641869, name: 'Kane' },
-    { employeeId: 639558, name: 'Shareef' }
+    { employeeId: 643156, name: 'Aaron' }
   ]
 }
 
