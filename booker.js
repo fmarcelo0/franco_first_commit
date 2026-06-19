@@ -439,16 +439,22 @@ async function lookupCustomerByPhone(phone) {
   const matches = await findCustomers({ phone })
   if (!matches.length) return null
 
+  // A phone can map to several customer records (especially test data). Use the
+  // first for the caller's name/identity, but gather appointments across all of
+  // them so we don't miss one. Each appointment carries its own customerId.
   const customer = normalizeCustomer(matches[0])
   let appointments = []
-  if (customer.customerId) {
+  for (const m of matches.slice(0, 5).map(normalizeCustomer)) {
+    if (!m.customerId) continue
     try {
-      const raw = await findAppointments({ customerId: customer.customerId })
-      appointments = raw.map(normalizeAppointment)
+      const raw = await findAppointments({ customerId: m.customerId })
+      appointments = appointments.concat(raw.map(normalizeAppointment))
     } catch (err) {
-      console.error('FindAppointments after FindCustomers failed:', err.message)
+      console.error('FindAppointments failed for', m.customerId, err.message)
     }
   }
+  // Only show appointments that aren't cancelled.
+  appointments = appointments.filter(a => a.status !== 'Cancelled')
   return { ...customer, appointments }
 }
 

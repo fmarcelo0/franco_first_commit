@@ -61,18 +61,24 @@ Live availability is temporarily unavailable. Do not quote or invent specific op
   return block
 }
 
-// Identify the caller by phone: live via Booker Merchant FindCustomers when
-// configured, mock customer records otherwise.
+// Identify the caller by phone via Booker. Cached per phone (5 min) so the
+// lookup isn't repeated on every turn of a call.
+const _callerCache = new Map()
 async function resolveCaller(phone) {
+  if (!phone) return null
+  const hit = _callerCache.get(phone)
+  if (hit && Date.now() - hit.ts < 5 * 60 * 1000) return hit.caller
+
+  let caller = null
   if (booker.isMerchantConfigured()) {
     try {
-      const live = await booker.lookupCustomerByPhone(phone)
-      if (live) return live
+      caller = await booker.lookupCustomerByPhone(phone)
     } catch (err) {
       console.error('Booker customer lookup failed:', err.message)
     }
   }
-  return null
+  _callerCache.set(phone, { caller, ts: Date.now() })
+  return caller
 }
 
 function describeCustomer(c) {
