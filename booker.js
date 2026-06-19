@@ -194,18 +194,35 @@ async function findAppointments({ customerId, fromDate, toDate } = {}) {
 }
 
 // PUT /v4.1/customer/appointment/cancel
-async function cancelAppointment({ appointmentId, cancellationReasonId } = {}) {
-  const token = await getAccessToken()
-  const payload = { ID: Number(appointmentId), access_token: token }
-  if (cancellationReasonId) payload.CancellationReasonID = Number(cancellationReasonId)
-
-  const res = await fetchWithTimeout(`${BASE_URL}/v4.1/customer/appointment/cancel`, {
+// PUT /v4.1/merchant/appointment/cancel -> cancels as the business (no customer
+// login needed). Confirmed working against location 3749.
+async function cancelAppointment({ appointmentId } = {}) {
+  const token = await getMerchantAccessToken()
+  const res = await fetchWithTimeout(`${BASE_URL}/v4.1/merchant/appointment/cancel`, {
     method: 'PUT',
-    headers: authedHeaders(token),
-    body: JSON.stringify(payload)
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': MERCHANT_SUBSCRIPTION_KEY },
+    body: JSON.stringify({ ID: Number(appointmentId), access_token: token })
   })
-  if (!res.ok) throw new Error(`CancelAppointment failed: ${res.status} ${await res.text()}`)
+  if (!res.ok) throw new Error(`cancelAppointment failed: ${res.status} ${await res.text()}`)
   return res.json()
+}
+
+// Reschedule = rebook the same service/staff at the new time, then cancel the
+// old one. (Booker has no atomic "move".) Book-first so a failed rebook can't
+// lose the appointment — we only cancel the old one once the new one is booked.
+async function rescheduleAppointment({ appointmentId, customerId, treatmentId, employeeId, roomId, startDateTime, endDateTime }) {
+  const booked = await createMerchantAppointment({
+    customerId,
+    treatmentId,
+    roomId: roomId || DEFAULT_ROOM_ID,
+    employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
+    startDateTime,
+    endDateTime
+  })
+  if (booked && booked.IsSuccess) {
+    await cancelAppointment({ appointmentId }).catch(() => {})
+  }
+  return booked
 }
 
 // --- Create customer + appointment (Customer API writes) -----------------
@@ -350,12 +367,17 @@ function normalizeCustomer(raw) {
 }
 
 // Normalize a raw Booker appointment (from FindAppointments) into our shape.
+// Includes the IDs needed to cancel/reschedule.
 function normalizeAppointment(raw) {
-  const treatment = raw.AppointmentTreatments && raw.AppointmentTreatments[0]
+  const t = raw.AppointmentTreatments && raw.AppointmentTreatments[0]
   return {
     appointmentId: raw.ID,
-    serviceName: treatment?.Treatment?.Name || raw.Treatment?.Name || 'Appointment',
-    employeeName: treatment?.Employee?.FirstName || '',
+    customerId: raw.Customer?.ID,
+    treatmentId: t?.Treatment?.ID,
+    employeeId: t?.Employee?.ID,
+    durationMin: t?.TreatmentDuration || 30,
+    serviceName: t?.Treatment?.Name || raw.Treatment?.Name || 'Appointment',
+    employeeName: t?.Employee?.FirstName || '',
     startDateTime: raw.StartDateTimeOffset || raw.StartDateTime,
     status: raw.Status?.Name || (raw.IsCancelled ? 'Cancelled' : 'Booked')
   }
@@ -442,6 +464,7 @@ module.exports = {
   bookAppointment,
   findAppointments,
   cancelAppointment,
+  rescheduleAppointment,
   createCustomer,
   createAppointment,
   createMerchantAppointment,

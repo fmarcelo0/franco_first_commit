@@ -119,6 +119,30 @@ const BOOKING_TOOLS = [
       },
       required: ['firstname', 'lastname', 'service_name', 'date', 'time']
     }
+  },
+  {
+    name: 'cancel_appointment',
+    description: "Cancel one of the caller's existing appointments (use the appointment number from their record).",
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: { type: 'number', description: 'the appointment number to cancel' }
+      },
+      required: ['appointment_id']
+    }
+  },
+  {
+    name: 'reschedule_appointment',
+    description: "Move one of the caller's existing appointments to a new date and time.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: { type: 'number', description: 'the appointment number to move' },
+        new_date: { type: 'string', description: 'new date as YYYY-MM-DD' },
+        new_time: { type: 'string', description: 'new start time as HH:MM, 24-hour' }
+      },
+      required: ['appointment_id', 'new_date', 'new_time']
+    }
   }
 ]
 
@@ -166,6 +190,39 @@ async function runBookingTool(name, input, ctx = {}) {
       return `Booking error: ${e.message}`
     }
   }
+  if (name === 'cancel_appointment') {
+    try {
+      const res = await booker.cancelAppointment({ appointmentId: input.appointment_id })
+      return res.IsSuccess ? 'That appointment has been cancelled.' : `Could not cancel: ${res.ErrorMessage || 'unknown error'}`
+    } catch (e) {
+      return `Cancel error: ${e.message}`
+    }
+  }
+  if (name === 'reschedule_appointment') {
+    const appt = (ctx.caller?.appointments || []).find(a => a.appointmentId === Number(input.appointment_id))
+    if (!appt) return "I couldn't find that appointment on your account."
+    const pad = n => String(n).padStart(2, '0')
+    const [h, m] = input.new_time.split(':').map(Number)
+    const endMin = h * 60 + m + (appt.durationMin || 30)
+    const startDateTime = `${input.new_date}T${pad(h)}:${pad(m)}:00+02:00`
+    const endDateTime = `${input.new_date}T${pad(Math.floor(endMin / 60))}:${pad(endMin % 60)}:00+02:00`
+    try {
+      const res = await booker.rescheduleAppointment({
+        appointmentId: appt.appointmentId,
+        customerId: appt.customerId,
+        treatmentId: appt.treatmentId,
+        employeeId: appt.employeeId,
+        startDateTime,
+        endDateTime
+      })
+      if (res.IsSuccess) {
+        return `Rescheduled to ${input.new_date} at ${input.new_time}.${res.Appointment ? ' New confirmation number ' + res.Appointment.ID + '.' : ''}`
+      }
+      return `Could not reschedule: ${res.ErrorMessage || 'that time is not available'}`
+    } catch (e) {
+      return `Reschedule error: ${e.message}`
+    }
+  }
   return 'Unknown tool.'
 }
 
@@ -191,10 +248,12 @@ You can look up real services and book appointments using your tools.
 - If the caller requests a specific staff member (${MOCK_BUSINESS.staff.map(s => s.name).join(', ')}), pass it as the employee. Otherwise leave it blank and we'll assign someone.
 - If the booking comes back as not available, tell the caller and offer a different time.
 - After a successful booking, read the confirmation number back to the caller.
+- To cancel an existing appointment, use cancel_appointment with its appointment number (shown in the caller's record).
+- To move an appointment, use reschedule_appointment with its appointment number and the new date and time.
 Ask for any missing detail before booking. Today's date is ${new Date().toISOString().slice(0, 10)}.
 
 CALLER IDENTIFICATION:
-We usually recognize callers by the phone number they are calling from. If a "CALLER ON THE LINE" section is provided below, you already know who they are and what appointments they have — greet them by their first name and answer questions about "my appointment" directly from that info. Do NOT ask them to identify themselves again. If they ask to cancel or change an appointment, confirm the details back to them and let them know a staff member will finalize the change. If NO caller section is provided, politely ask for their first and last name and the phone number on their account so it can be looked up.
+We usually recognize callers by the phone number they are calling from. If a "CALLER ON THE LINE" section is provided below, you already know who they are and what appointments they have — greet them by their first name and answer questions about "my appointment" directly from that info. Do NOT ask them to identify themselves again. If they ask to cancel or change an appointment, confirm which appointment, then use the cancel_appointment or reschedule_appointment tool to do it. If NO caller section is provided, politely ask for their first and last name and the phone number on their account so it can be looked up.
 
 Only respond with exactly the word TRANSFER (and nothing else) when the caller EXPLICITLY asks to speak to a human, a person, or a representative. Never transfer for any other reason. If a tool fails, a service isn't found, or a time isn't available, apologize briefly and keep helping — offer to look again, suggest another time, or take their details. Do not give up and transfer on your own.`
 
@@ -283,7 +342,7 @@ wss.on('connection', (ws) => {
           console.log('Tool:', block.name, JSON.stringify(block.input))
           let result
           try {
-            result = await runBookingTool(block.name, block.input, { callerPhone })
+            result = await runBookingTool(block.name, block.input, { callerPhone, caller })
           } catch (e) {
             result = `Error: ${e.message}`
           }
