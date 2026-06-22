@@ -134,6 +134,34 @@ async function getDayAvailability({ fromDateTime, serviceId } = {}) {
   return res.json()
 }
 
+// POST /v5/realtime_availability/itinerary/1day/ -> open slots (time + employee)
+// for a service on a given day. Returns [] when the account has no staff/schedule
+// configured for that service (as in the current test sandbox). Request shape
+// confirmed working against location 3749.
+async function searchAvailability({ treatmentId, date } = {}) {
+  const token = await getAccessToken()
+  const res = await fetchWithTimeout(`${BASE_URL}/v5/realtime_availability/itinerary/1day/`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Ocp-Apim-Subscription-Key': SUBSCRIPTION_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      LocationId: Number(LOCATION_ID),
+      fromDateTime: `${date}T00:00:00`,
+      Itineraries: [{ ItineraryProducts: [{ TreatmentId: Number(treatmentId), Quantity: 1 }] }]
+    })
+  })
+  if (!res.ok) throw new Error(`searchAvailability failed: ${res.status} ${await res.text()}`)
+
+  const data = await res.json()
+  const slots = []
+  for (const it of data.itineraryList || []) {
+    for (const av of it.availabilities || []) {
+      const item = (av.availabilityItems || [])[0] || {}
+      slots.push({ startDateTime: av.startDateTime, employeeId: item.employeeId, serviceId: item.serviceId, duration: item.duration })
+    }
+  }
+  return slots
+}
+
 // --- Treatments (services) -----------------------------------------------
 
 // POST /v4.1/customer/treatments -> the location's services (with real IDs,
@@ -465,6 +493,7 @@ module.exports = {
   getMerchantAccessToken,
   getAvailableDates,
   getDayAvailability,
+  searchAvailability,
   findTreatments,
   searchTreatments,
   bookAppointment,
