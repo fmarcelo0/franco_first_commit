@@ -19,9 +19,10 @@ const MOCK_BUSINESS = {
   phone: '(973) 903-5245',
   address: '123 Main Street, Montclair, NJ 07042',
   // Real bookable Booker employee (Location 3749). "Aaron" = aaaaaaron aaaapple,
-  // the one staff member confirmed to perform services in this test account.
+  // Clori (real) Marcelo performs every service in this test account, so she can
+  // be booked for anything (and is the default employee).
   staff: [
-    { employeeId: 643156, name: 'Aaron' }
+    { employeeId: 643224, name: 'Clori' }
   ]
 }
 
