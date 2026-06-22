@@ -174,16 +174,38 @@ async function runBookingTool(name, input, ctx = {}) {
     // Build start/end in Paris offset (CEST, +02:00) — the format Booker accepts.
     const pad = n => String(n).padStart(2, '0')
     const [h, m] = input.time.split(':').map(Number)
+    const reqTime = `${pad(h)}:${pad(m)}`
     const endMin = h * 60 + m + (svc.duration || 30)
-    const startDateTime = `${input.date}T${pad(h)}:${pad(m)}:00+02:00`
+    const startDateTime = `${input.date}T${reqTime}:00+02:00`
     const endDateTime = `${input.date}T${pad(Math.floor(endMin / 60))}:${pad(endMin % 60)}:00+02:00`
+
+    let employeeId = findStaffId(input.employee)  // undefined -> default employee
+
+    // Consult live availability to pick a real open slot (employee + time). If
+    // the account returns no availability, fall through to the default employee.
+    try {
+      const slots = await booker.searchAvailability({ treatmentId: svc.treatmentId, date: input.date })
+      if (slots.length) {
+        const atTime = slots.filter(s => (s.startDateTime || '').slice(11, 16) === reqTime)
+        if (!atTime.length) {
+          const open = [...new Set(slots.map(s => (s.startDateTime || '').slice(11, 16)))].filter(Boolean).slice(0, 6)
+          return `${input.time} isn't available for ${svc.name} on ${input.date}. Open times: ${open.join(', ')}. Which would you like?`
+        }
+        // Prefer the requested staff member if free at that time, else take any.
+        const pick = (employeeId && atTime.find(s => s.employeeId === employeeId)) || atTime[0]
+        employeeId = pick.employeeId
+      }
+    } catch (e) {
+      console.error('availability check failed, proceeding with default:', e.message)
+    }
+
     try {
       const res = await booker.bookAppointment({
         firstName: input.firstname,
         lastName: input.lastname,
         phone: ctx.callerPhone,
         treatmentId: svc.treatmentId,
-        employeeId: findStaffId(input.employee),  // undefined -> default employee
+        employeeId,
         startDateTime,
         endDateTime
       })
