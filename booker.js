@@ -242,7 +242,7 @@ async function rescheduleAppointment({ appointmentId, customerId, treatmentId, e
   const booked = await createMerchantAppointment({
     customerId,
     treatmentId,
-    roomId: roomId || DEFAULT_ROOM_ID,
+    roomId: await resolveRoomId(treatmentId, roomId),
     employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
     startDateTime,
     endDateTime
@@ -440,6 +440,56 @@ async function createMerchantAppointment({ customerId, treatmentId, roomId, empl
   return res.json()
 }
 
+// --- Rooms (per-treatment room lookup) -----------------------------------
+// POST /v4.1/merchant/rooms -> the location's rooms, each with the list of
+// TreatmentIDs it can host. A treatment can ONLY be booked into a room that
+// supports it; booking into a non-supporting room returns "The room is not
+// available at this time." So we resolve a matching room per treatment instead
+// of using one hardcoded default room (which fails for every service that room
+// doesn't host). Cached for the process — room config rarely changes.
+let roomsCache = null
+async function getRooms() {
+  if (roomsCache) return roomsCache
+  const token = await getMerchantAccessToken()
+  const res = await fetchWithTimeout(`${BASE_URL}/v4.1/merchant/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': MERCHANT_SUBSCRIPTION_KEY },
+    body: JSON.stringify({ access_token: token, LocationID: Number(LOCATION_ID) })
+  })
+  if (!res.ok) throw new Error(`getRooms failed: ${res.status} ${await res.text()}`)
+  const data = await res.json()
+  roomsCache = (data.Results || []).map(r => ({
+    roomId: r.ID,
+    name: r.Name,
+    capacity: r.Capacity,
+    treatments: r.Treatments || []
+  }))
+  return roomsCache
+}
+
+// Return a RoomID that can host this treatment, or undefined if none match.
+// Prefers the smallest-capacity supporting room so a dedicated service room is
+// chosen over a giant catch-all room (leaving large multi-use rooms free).
+async function findRoomForTreatment(treatmentId) {
+  const id = Number(treatmentId)
+  try {
+    const matches = (await getRooms()).filter(r => r.treatments.includes(id))
+    if (!matches.length) return undefined
+    matches.sort((a, b) => (a.capacity || 0) - (b.capacity || 0))
+    return matches[0].roomId
+  } catch (err) {
+    console.error('findRoomForTreatment failed:', err.message)
+    return undefined
+  }
+}
+
+// Resolve the room to book a treatment into: an explicit roomId wins, otherwise
+// look one up by treatment, falling back to DEFAULT_ROOM_ID only as a last
+// resort (which may itself not support the treatment).
+async function resolveRoomId(treatmentId, roomId) {
+  return roomId || (await findRoomForTreatment(treatmentId)) || DEFAULT_ROOM_ID
+}
+
 // High-level booking used by the call flow: creates the customer, then books
 // the appointment as the business. Returns Booker's raw result (IsSuccess /
 // ErrorMessage / Appointment).
@@ -454,7 +504,7 @@ async function bookAppointment({ firstName, lastName, email, phone, treatmentId,
   return createMerchantAppointment({
     customerId,
     treatmentId,
-    roomId: roomId || DEFAULT_ROOM_ID,
+    roomId: await resolveRoomId(treatmentId, roomId),
     employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
     startDateTime,
     endDateTime
@@ -496,6 +546,8 @@ module.exports = {
   searchAvailability,
   findTreatments,
   searchTreatments,
+  getRooms,
+  findRoomForTreatment,
   bookAppointment,
   findAppointments,
   cancelAppointment,
