@@ -2,9 +2,10 @@
 
 import {
   BASE_URL, LOCATION_ID, SUBSCRIPTION_KEY, MERCHANT_SUBSCRIPTION_KEY,
-  DEFAULT_ROOM_ID, DEFAULT_EMPLOYEE_ID,
+  DEFAULT_EMPLOYEE_ID,
   fetchWithTimeout, getAccessToken, getMerchantAccessToken
 } from './api-client'
+import { resolveRoomId } from './lookups'
 
 interface CustomerInput {
   firstName?: string
@@ -169,7 +170,7 @@ export async function bookAppointment(
   return createMerchantAppointment({
     customerId,
     treatmentId,
-    roomId: roomId || DEFAULT_ROOM_ID,
+    roomId: await resolveRoomId(treatmentId, roomId),
     employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
     startDateTime,
     endDateTime
@@ -198,7 +199,7 @@ export async function rescheduleAppointment(
   const booked = await createMerchantAppointment({
     customerId,
     treatmentId,
-    roomId: roomId || DEFAULT_ROOM_ID,
+    roomId: await resolveRoomId(treatmentId, roomId),
     employeeId: employeeId || DEFAULT_EMPLOYEE_ID,
     startDateTime,
     endDateTime

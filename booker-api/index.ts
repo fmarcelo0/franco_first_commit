@@ -15,6 +15,9 @@ export {
   searchAvailability,
   findTreatments,
   searchTreatments,
+  getRooms,
+  findRoomForTreatment,
+  resolveRoomId,
   findAppointments,
   findCustomers,
   lookupCustomerByPhone
