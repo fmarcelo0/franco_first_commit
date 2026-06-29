@@ -13,6 +13,6 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "include": ["receptionist", "booker-api", "app-constants"],
+  "include": ["receptionist", "booker-api", "app-constants", "demo"],
   "exclude": ["node_modules", "dist"]
 }

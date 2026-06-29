@@ -3,7 +3,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/receptionist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "demo": "npm run build && node dist/demo/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
