@@ -1,21 +1,20 @@
-require('dotenv').config()
-const express = require('express')
-const Anthropic = require('@anthropic-ai/sdk')
-const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk')
-const WebSocket = require('ws')
-const http = require('http')
-const twilio = require('twilio')
-const booker = require('./booker')
-const {
+import 'dotenv/config'
+import express from 'express'
+import Anthropic from '@anthropic-ai/sdk'
+import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk'
+import { WebSocketServer, type WebSocket, type RawData } from 'ws'
+import http from 'http'
+import twilio from 'twilio'
+import * as booker from '../booker-api'
+import {
   MODEL, MAX_TOKENS,
   CONVERSATION_TTL_MS, PURGE_INTERVAL_MS,
   PORT, SPEECH_RATE, TRANSFER_NUMBER, STREAM_URL, DEEPGRAM_CONFIG,
-  BUSINESS: MOCK_BUSINESS
-} = require('./constants')
-const {
-  describeCustomer, getAvailabilityBlock, resolveCaller, runBookingTool
-} = require('./helpers')
-const { SYSTEM_PROMPT, BOOKING_TOOLS } = require('./claude-constants')
+  BUSINESS as MOCK_BUSINESS
+} from '../app-constants'
+import { describeCustomer, getAvailabilityBlock } from './receptionist-helpers'
+import { resolveCaller, runBookingTool } from './booker-helpers'
+import { SYSTEM_PROMPT, BOOKING_TOOLS } from '../app-constants/claude'
 
 const app = express()
 app.use(express.urlencoded({ extended: false }))
@@ -25,7 +24,7 @@ const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY)
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
 
 // Single place for the Claude call so its config isn't duplicated per turn.
-function askClaude(systemPrompt, messages) {
+function askClaude(systemPrompt: string, messages: Anthropic.MessageParam[]) {
   return anthropic.messages.create({
     model: MODEL,
     max_tokens: MAX_TOKENS,
@@ -55,7 +54,7 @@ app.post('/voice', (req, res) => {
 // Conversation history per call, keyed by Twilio callSid. Persists across the
 // stream reconnect that happens between turns, so the AI remembers the whole
 // conversation instead of just the latest sentence.
-const conversations = new Map()
+const conversations = new Map<string, { messages: Anthropic.MessageParam[]; ts: number }>()
 
 // Purge stale conversations periodically so the map doesn't grow forever.
 setInterval(() => {
@@ -66,20 +65,20 @@ setInterval(() => {
 }, PURGE_INTERVAL_MS).unref()
 
 const server = http.createServer(app)
-const wss = new WebSocket.Server({ server, path: '/stream' })
+const wss = new WebSocketServer({ server, path: '/stream' })
 
-wss.on('connection', (ws) => {
-  let callSid = null
-  let callerPhone = null
+wss.on('connection', (ws: WebSocket) => {
+  let callSid = ''
+  let callerPhone: string | null = null
   let isSpeaking = false
-  let availabilityBlock = null  // fetched once per call, then reused
-  let caller = null             // resolved once per call (live or mock)
+  let availabilityBlock: string | null = null  // fetched once per call, then reused
+  let caller: any = null                        // resolved once per call (live or mock)
   let callerResolved = false
 
 
-  const dgConnection = deepgramClient.listen.live(DEEPGRAM_CONFIG)
+  const dgConnection = deepgramClient.listen.live(DEEPGRAM_CONFIG as any)
 
-  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data: any) => {
     const text = data.channel?.alternatives[0]?.transcript
     if (!text || !data.is_final || isSpeaking) return
 
@@ -94,20 +93,23 @@ wss.on('connection', (ws) => {
       const systemPrompt = `${SYSTEM_PROMPT}\n\n${availabilityBlock}${customerSection}`
 
       const prior = conversations.get(callSid)
-      const messages = [...(prior ? prior.messages : []), { role: 'user', content: text }]
+      const messages: Anthropic.MessageParam[] = [
+        ...(prior ? prior.messages : []),
+        { role: 'user', content: text }
+      ]
       let response = await askClaude(systemPrompt, messages)
 
       // Let the AI call tools (lookup/booking) before its final spoken reply.
       while (response.stop_reason === 'tool_use') {
         messages.push({ role: 'assistant', content: response.content })
-        const toolResults = []
+        const toolResults: Anthropic.ToolResultBlockParam[] = []
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
           console.log('Tool:', block.name, JSON.stringify(block.input))
-          let result
+          let result: string
           try {
             result = await runBookingTool(block.name, block.input, { callerPhone, caller })
-          } catch (e) {
+          } catch (e: any) {
             result = `Error: ${e.message}`
           }
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: String(result) })
@@ -120,7 +122,8 @@ wss.on('connection', (ws) => {
       messages.push({ role: 'assistant', content: response.content })
       conversations.set(callSid, { messages, ts: Date.now() })
 
-      const reply = (response.content.find(b => b.type === 'text') || {}).text || ''
+      const textBlock = response.content.find((b): b is Anthropic.TextBlock => b.type === 'text')
+      const reply = textBlock ? textBlock.text : ''
       console.log('AI:', reply)
 
       if (reply.includes('TRANSFER')) {
@@ -140,15 +143,17 @@ wss.on('connection', (ws) => {
     }
   })
 
-  ws.on('message', (data) => {
+  ws.on('message', (data: RawData) => {
     try {
-      const msg = JSON.parse(data)
+      const msg = JSON.parse(data.toString())
       if (msg.event === 'start') {
         callSid = msg.start.callSid
         callerPhone = msg.start.customParameters?.from || null
       }
       if (msg.event === 'media') {
-        dgConnection.send(Buffer.from(msg.media.payload, 'base64'))
+        // Deepgram's send() accepts the raw audio bytes; its type is narrower
+        // than Buffer, so cast to satisfy the checker.
+        dgConnection.send(Buffer.from(msg.media.payload, 'base64') as any)
       }
       if (msg.event === 'stop') dgConnection.finish()
     } catch (e) {}

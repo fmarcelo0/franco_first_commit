@@ -1,11 +1,12 @@
 // Claude-facing constants — everything the model reads and takes in: the system
-// prompt and the tool definitions. Kept separate from constants.js so the
-// tunable config values and the (much larger) model-facing copy don't crowd
-// each other.
+// prompt and the tool definitions. Kept separate from the general app config
+// (./index) so the tunable config values and the (much larger) model-facing
+// copy don't crowd each other.
 
-const { BUSINESS: MOCK_BUSINESS } = require('./constants')
+import type Anthropic from '@anthropic-ai/sdk'
+import { BUSINESS as MOCK_BUSINESS } from './index'
 
-const SYSTEM_PROMPT = `You are a friendly receptionist for ${MOCK_BUSINESS.name}.
+export const SYSTEM_PROMPT = `You are a friendly receptionist for ${MOCK_BUSINESS.name}.
 You help callers with questions about hours, pricing, services, staff, and appointment availability.
 Keep responses short and conversational — this is a phone call, 1-2 sentences max.
 
@@ -39,7 +40,7 @@ Only respond with exactly the word TRANSFER (and nothing else) when the caller E
 
 // Tools the AI can call during a live call to look up services and book
 // appointments in the real Booker/Mindbody account.
-const BOOKING_TOOLS = [
+export const BOOKING_TOOLS: Anthropic.Tool[] = [
   {
     name: 'lookup_service',
     description: 'Look up a salon service by name to get its real price and duration before booking.',
@@ -104,5 +105,3 @@ const BOOKING_TOOLS = [
     }
   }
 ]
-
-module.exports = { SYSTEM_PROMPT, BOOKING_TOOLS }
