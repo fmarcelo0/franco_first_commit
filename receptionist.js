@@ -1,0 +1,198 @@
+require('dotenv').config()
+const express = require('express')
+const Anthropic = require('@anthropic-ai/sdk')
+const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk')
+const WebSocket = require('ws')
+const http = require('http')
+const twilio = require('twilio')
+const booker = require('./booker')
+const {
+  MODEL, MAX_TOKENS, BOOKING_TOOLS,
+  CONVERSATION_TTL_MS, PURGE_INTERVAL_MS,
+  PORT, SPEECH_RATE, TRANSFER_NUMBER, STREAM_URL, DEEPGRAM_CONFIG,
+  BUSINESS: MOCK_BUSINESS
+} = require('./constants')
+const {
+  describeCustomer, getAvailabilityBlock, resolveCaller, runBookingTool
+} = require('./helpers')
+
+const app = express()
+app.use(express.urlencoded({ extended: false }))
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const deepgramClient = createClient(process.env.DEEPGRAM_API_KEY)
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+
+// Single place for the Claude call so its config isn't duplicated per turn.
+function askClaude(systemPrompt, messages) {
+  return anthropic.messages.create({
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
+    system: systemPrompt,
+    tools: BOOKING_TOOLS,
+    messages
+  })
+}
+
+const SYSTEM_PROMPT = `You are a friendly receptionist for ${MOCK_BUSINESS.name}.
+You help callers with questions about hours, pricing, services, staff, and appointment availability.
+Keep responses short and conversational — this is a phone call, 1-2 sentences max.
+
+BUSINESS INFO:
+- Address: ${MOCK_BUSINESS.address}
+- Phone: ${MOCK_BUSINESS.phone}
+- Hours: Monday-Saturday 9am-7pm, Sunday 10am-5pm
+
+SERVICES & PRICING:
+Do NOT quote service names or prices from memory — they may be wrong. ALWAYS use the lookup_service tool to find the real service and price before quoting it or booking. A caller's wording may differ from our naming (e.g. "eyebrow wax" is our "Waxing - Brows"), so search and use the closest real match the tool returns.
+
+STAFF:
+${MOCK_BUSINESS.staff.map(s => s.name).join(', ')}
+
+BOOKING & APPOINTMENTS:
+You can look up real services and book appointments using your tools.
+- Use lookup_service to confirm a service's real price and duration.
+- Use check_availability to tell the caller what times are open for a service on a date.
+- To book, collect the caller's first name, last name, the service, a date (YYYY-MM-DD) and a time (HH:MM), then use book_appointment.
+- If the caller requests a specific staff member (${MOCK_BUSINESS.staff.map(s => s.name).join(', ')}), pass it as the employee. Otherwise leave it blank and we'll assign someone.
+- If the booking comes back as not available, tell the caller and offer a different time.
+- After a successful booking, read the confirmation number back to the caller.
+- To cancel an existing appointment, use cancel_appointment with its appointment number (shown in the caller's record).
+- To move an appointment, use reschedule_appointment with its appointment number and the new date and time.
+Ask for any missing detail before booking. Today's date is ${new Date().toISOString().slice(0, 10)}.
+
+CALLER IDENTIFICATION:
+We usually recognize callers by the phone number they are calling from. If a "CALLER ON THE LINE" section is provided below, you already know who they are and what appointments they have — greet them by their first name and answer questions about "my appointment" directly from that info. Do NOT ask them to identify themselves again. If they ask to cancel or change an appointment, confirm which appointment, then use the cancel_appointment or reschedule_appointment tool to do it. If NO caller section is provided, politely ask for their first and last name and the phone number on their account so it can be looked up.
+
+Only respond with exactly the word TRANSFER (and nothing else) when the caller EXPLICITLY asks to speak to a human, a person, or a representative. Never transfer for any other reason. If a tool fails, a service isn't found, or a time isn't available, apologize briefly and keep helping — offer to look again, suggest another time, or take their details. Do not give up and transfer on your own.`
+
+app.get('/', (req, res) => res.send('Adore Salon AI Receptionist is running'))
+
+app.post('/voice', (req, res) => {
+  const from = req.body.From || ''
+  res.type('text/xml')
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+      <Say><prosody rate="${SPEECH_RATE}">Hello, thank you for calling ${MOCK_BUSINESS.name}. How can I help you today?</prosody></Say>
+      <Connect>
+        <Stream url="wss://${req.headers.host}/stream">
+          <Parameter name="from" value="${from}" />
+        </Stream>
+      </Connect>
+    </Response>
+  `)
+})
+
+// Conversation history per call, keyed by Twilio callSid. Persists across the
+// stream reconnect that happens between turns, so the AI remembers the whole
+// conversation instead of just the latest sentence.
+const conversations = new Map()
+
+// Purge stale conversations periodically so the map doesn't grow forever.
+setInterval(() => {
+  const cutoff = Date.now() - CONVERSATION_TTL_MS
+  for (const [sid, c] of conversations) {
+    if (c.ts < cutoff) conversations.delete(sid)
+  }
+}, PURGE_INTERVAL_MS).unref()
+
+const server = http.createServer(app)
+const wss = new WebSocket.Server({ server, path: '/stream' })
+
+wss.on('connection', (ws) => {
+  let callSid = null
+  let callerPhone = null
+  let isSpeaking = false
+  let availabilityBlock = null  // fetched once per call, then reused
+  let caller = null             // resolved once per call (live or mock)
+  let callerResolved = false
+
+
+  const dgConnection = deepgramClient.listen.live(DEEPGRAM_CONFIG)
+
+  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+    const text = data.channel?.alternatives[0]?.transcript
+    if (!text || !data.is_final || isSpeaking) return
+
+    console.log('Caller:', text)
+    isSpeaking = true
+
+    try {
+      if (availabilityBlock === null) availabilityBlock = await getAvailabilityBlock()
+      if (!callerResolved) { caller = await resolveCaller(callerPhone); callerResolved = true }
+
+      const customerSection = caller ? `\n\nCALLER ON THE LINE:\n${describeCustomer(caller)}` : ''
+      const systemPrompt = `${SYSTEM_PROMPT}\n\n${availabilityBlock}${customerSection}`
+
+      const prior = conversations.get(callSid)
+      const messages = [...(prior ? prior.messages : []), { role: 'user', content: text }]
+      let response = await askClaude(systemPrompt, messages)
+
+      // Let the AI call tools (lookup/booking) before its final spoken reply.
+      while (response.stop_reason === 'tool_use') {
+        messages.push({ role: 'assistant', content: response.content })
+        const toolResults = []
+        for (const block of response.content) {
+          if (block.type !== 'tool_use') continue
+          console.log('Tool:', block.name, JSON.stringify(block.input))
+          let result
+          try {
+            result = await runBookingTool(block.name, block.input, { callerPhone, caller })
+          } catch (e) {
+            result = `Error: ${e.message}`
+          }
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: String(result) })
+        }
+        messages.push({ role: 'user', content: toolResults })
+        response = await askClaude(systemPrompt, messages)
+      }
+
+      // Remember this turn so the AI has context for the caller's next sentence.
+      messages.push({ role: 'assistant', content: response.content })
+      conversations.set(callSid, { messages, ts: Date.now() })
+
+      const reply = (response.content.find(b => b.type === 'text') || {}).text || ''
+      console.log('AI:', reply)
+
+      if (reply.includes('TRANSFER')) {
+        await twilioClient.calls(callSid).update({
+          twiml: `<Response><Say>Please hold while I transfer you.</Say><Dial>${TRANSFER_NUMBER}</Dial></Response>`
+        })
+        return
+      }
+
+      await twilioClient.calls(callSid).update({
+        twiml: `<Response><Say><prosody rate="${SPEECH_RATE}">${reply}</prosody></Say><Connect><Stream url="${STREAM_URL}"><Parameter name="from" value="${callerPhone || ''}"/></Stream></Connect></Response>`
+      })
+    } catch (err) {
+      console.error(err)
+    } finally {
+      isSpeaking = false
+    }
+  })
+
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data)
+      if (msg.event === 'start') {
+        callSid = msg.start.callSid
+        callerPhone = msg.start.customParameters?.from || null
+      }
+      if (msg.event === 'media') {
+        dgConnection.send(Buffer.from(msg.media.payload, 'base64'))
+      }
+      if (msg.event === 'stop') dgConnection.finish()
+    } catch (e) {}
+  })
+
+  ws.on('close', () => dgConnection.finish())
+})
+
+server.listen(PORT, () => {
+  console.log(`Running on port ${PORT}`)
+  console.log(booker.isConfigured()
+    ? `Booker API: LIVE (location ${booker.LOCATION_ID})`
+    : 'Booker API: NOT configured — using mock data')
+  // Warm the availability cache so the first caller doesn't wait on it.
+  getAvailabilityBlock().then(() => console.log('Availability cache warmed')).catch(() => {})
+})

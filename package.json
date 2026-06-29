@@ -1,7 +1,7 @@
 {
   "name": "adore-salon",
   "scripts": {
-    "start": "node index.js"
+    "start": "node receptionist.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

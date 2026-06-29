@@ -383,7 +383,7 @@ async function findCustomers({ phone, firstName, lastName, email } = {}) {
   return (data.Customers || data.Results || []).map(c => c.Customer || c)
 }
 
-// Normalize a raw Booker customer object into the shape index.js expects.
+// Normalize a raw Booker customer object into the shape receptionist.js expects.
 function normalizeCustomer(raw) {
   return {
     customerId: raw.ID ?? raw.CustomerID,
